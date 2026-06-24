@@ -1,6 +1,7 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <ArduinoMqttClient.h>
 #include <DHT.h>
+#include <esp_system.h>
 
 // ===== CONFIGURAÇÃO DO SENSOR =====
 #define DHTPIN 4          // GPIO conectado ao DATA do DHT22
@@ -10,21 +11,27 @@
 const char* WIFI_SSID = "SEU_WIFI";
 const char* WIFI_PASSWORD = "SUA_SENHA";
 
-// IMPORTANTE:
-// Use o IP da máquina que está rodando o backend -> ip addr (comando para ver IP da máquina).
-const char* API_URL = "http://192.168.0.10:8080/api/readings";
+// Use o IP da máquina que está rodando o Mosquitto.
+const char* MQTT_BROKER = "192.168.0.10";
+const int MQTT_PORT = 1883;
+const char* MQTT_USERNAME = "smartgarden";
+const char* MQTT_PASSWORD = "smartgarden_mqtt";
 const char* DEVICE_CODE = "esp32-jardim-bloco-a";
 
 // ===== INTERVALO ENTRE LEITURAS =====
 const unsigned long READ_INTERVAL_MS = 30000;
 const unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+const unsigned long MQTT_RETRY_INTERVAL_MS = 5000;
 
 // ===== OBJETO DO SENSOR =====
 DHT dht(DHTPIN, DHTTYPE);
+WiFiClient wifiClient;
+MqttClient mqttClient(wifiClient);
 
 // ===== CONTROLE DE TEMPO =====
 unsigned long lastReadAt = 0;
 unsigned long lastWifiRetryAt = 0;
+unsigned long lastMqttRetryAt = 0;
 
 void connectToWiFi() {
   Serial.println("Conectando ao Wi-Fi...");
@@ -66,43 +73,89 @@ bool ensureWiFiConnected() {
   return WiFi.status() == WL_CONNECTED;
 }
 
-void sendReadingToBackend(float temperature, float humidity) {
+bool ensureMqttConnected() {
   if (!ensureWiFiConnected()) {
-    Serial.println("Wi-Fi indisponivel. Leitura nao enviada.");
+    return false;
+  }
+
+  if (mqttClient.connected()) {
+    return true;
+  }
+
+  if (millis() - lastMqttRetryAt < MQTT_RETRY_INTERVAL_MS) {
+    return false;
+  }
+
+  lastMqttRetryAt = millis();
+  Serial.print("Conectando ao broker MQTT em ");
+  Serial.print(MQTT_BROKER);
+  Serial.print(":");
+  Serial.println(MQTT_PORT);
+
+  mqttClient.setId(DEVICE_CODE);
+  mqttClient.setUsernamePassword(MQTT_USERNAME, MQTT_PASSWORD);
+  mqttClient.setCleanSession(false);
+  mqttClient.setKeepAliveInterval(30UL * 1000UL);
+
+  if (!mqttClient.connect(MQTT_BROKER, MQTT_PORT)) {
+    Serial.print("Falha MQTT. Codigo: ");
+    Serial.println(mqttClient.connectError());
+    return false;
+  }
+
+  Serial.println("MQTT conectado com sucesso.");
+  return true;
+}
+
+String generateMessageId() {
+  uint8_t bytes[16];
+  for (int i = 0; i < 16; i += 4) {
+    uint32_t randomValue = esp_random();
+    memcpy(bytes + i, &randomValue, sizeof(randomValue));
+  }
+  bytes[6] = (bytes[6] & 0x0F) | 0x40;
+  bytes[8] = (bytes[8] & 0x3F) | 0x80;
+
+  char uuid[37];
+  snprintf(
+    uuid,
+    sizeof(uuid),
+    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+    bytes[0], bytes[1], bytes[2], bytes[3],
+    bytes[4], bytes[5], bytes[6], bytes[7],
+    bytes[8], bytes[9], bytes[10], bytes[11],
+    bytes[12], bytes[13], bytes[14], bytes[15]
+  );
+  return String(uuid);
+}
+
+void sendReadingToBackend(float temperature, float humidity) {
+  if (!ensureMqttConnected()) {
+    Serial.println("MQTT indisponivel. Leitura nao enviada.");
     return;
   }
 
-  HTTPClient http;
-  http.begin(API_URL);
-  http.addHeader("Content-Type", "application/json");
-
   String payload = "{";
-  payload += "\"deviceCode\":\"" + String(DEVICE_CODE) + "\",";
+  payload += "\"messageId\":\"" + generateMessageId() + "\",";
   payload += "\"temperatureC\":" + String(temperature, 2) + ",";
-  payload += "\"humidityPercent\":" + String(humidity, 2);
+  payload += "\"humidityPercent\":" + String(humidity, 2) + ",";
+  payload += "\"recordedAt\":null";
   payload += "}";
 
-  int httpCode = http.POST(payload);
+  String topic = "smartgarden/devices/" + String(DEVICE_CODE) + "/telemetry";
+  mqttClient.beginMessage(topic, payload.length(), false, 1);
+  mqttClient.print(payload);
+  int publishResult = mqttClient.endMessage();
 
-  Serial.println("===== ENVIO PARA BACKEND =====");
-  Serial.print("URL: ");
-  Serial.println(API_URL);
+  Serial.println("===== ENVIO MQTT =====");
+  Serial.print("Topico: ");
+  Serial.println(topic);
   Serial.print("Payload: ");
   Serial.println(payload);
-  Serial.print("HTTP status: ");
-  Serial.println(httpCode);
-
-  if (httpCode > 0) {
-    String response = http.getString();
-    Serial.print("Resposta: ");
-    Serial.println(response);
-  } else {
-    Serial.print("Erro HTTP: ");
-    Serial.println(http.errorToString(httpCode));
-  }
+  Serial.print("Resultado da publicacao: ");
+  Serial.println(publishResult);
 
   Serial.println("---------------------------------");
-  http.end();
 }
 
 void setup() {
@@ -125,6 +178,9 @@ void setup() {
 }
 
 void loop() {
+  if (mqttClient.connected()) {
+    mqttClient.poll();
+  }
 
   // Verifica se já passou o intervalo
   if (millis() - lastReadAt < READ_INTERVAL_MS) {

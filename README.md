@@ -2,7 +2,7 @@
 
 Firmware do projeto **SmartGarden**, um sistema de monitoramento ambiental para jardins inteligentes usando **ESP32** e sensor **DHT22**.
 
-Esta versao realiza a leitura de **temperatura** e **umidade do ar**, exibe os dados no **Monitor Serial** e envia as leituras para o backend Spring Boot via HTTP.
+Esta versao realiza a leitura de **temperatura** e **umidade do ar**, exibe os dados no **Monitor Serial** e publica as leituras no Mosquitto via MQTT QoS 1.
 
 ---
 
@@ -14,7 +14,7 @@ O objetivo deste firmware é coletar informações ambientais do jardim, como:
 - umidade relativa do ar;
 - status básico do ambiente.
 
-Esses dados futuramente serão enviados para um sistema web com dashboard administrativo.
+Esses dados são consumidos pelo backend Spring Boot e exibidos no dashboard administrativo.
 
 ---
 
@@ -26,7 +26,7 @@ Esses dados futuramente serão enviados para um sistema web com dashboard admini
 - Biblioteca DHT sensor library by Adafruit
 - Biblioteca Adafruit Unified Sensor
 - WiFi.h
-- HTTPClient.h
+- ArduinoMqttClient
 
 ---
 
@@ -51,52 +51,46 @@ No arquivo `esp32-dht22-serial.ino`, ajuste estes valores:
 ```cpp
 const char* WIFI_SSID = "SEU_WIFI";
 const char* WIFI_PASSWORD = "SUA_SENHA";
-const char* API_URL = "http://192.168.0.10:8080/api/readings";
+const char* MQTT_BROKER = "192.168.0.10";
+const int MQTT_PORT = 1883;
+const char* MQTT_USERNAME = "smartgarden";
+const char* MQTT_PASSWORD = "smartgarden_mqtt";
 const char* DEVICE_CODE = "esp32-jardim-bloco-a";
 ```
 
-## Importante sobre a URL do backend
+Instale também a biblioteca **ArduinoMqttClient** pelo gerenciador de bibliotecas da Arduino IDE.
 
-No `API_URL`, voce deve usar o IP da maquina que esta rodando o backend na sua rede local.
+## Importante sobre o endereço do broker
+
+Em `MQTT_BROKER`, use o IP da máquina que está executando o Docker Compose na rede local. `localhost` apontaria para o próprio ESP32.
 
 Exemplo:
 
 ```text
-http://192.168.0.10:8080/api/readings
+192.168.0.10
 ```
 
-Nao use:
+## Publicação MQTT
 
-```text
-http://localhost:8080/api/readings
-```
-
-O motivo é que, para o ESP32, `localhost` aponta para o proprio ESP32 e nao para o seu computador.
-
-## Payload enviado para o backend
-
-O firmware envia um `POST` para o backend com este JSON:
+O tópico é montado automaticamente a partir de `DEVICE_CODE`: `smartgarden/devices/{deviceCode}/telemetry`.
 
 ```json
 {
-  "deviceCode": "esp32-jardim-bloco-a",
+  "messageId": "9d892fe8-d62a-4bd9-a0cc-a4c70f78271e",
   "temperatureC": 27.40,
-  "humidityPercent": 63.10
+  "humidityPercent": 63.10,
+  "recordedAt": null
 }
 ```
 
-Esse payload e compativel com o endpoint:
-
-```text
-POST /api/readings
-```
+Cada leitura recebe um UUID novo. O backend usa esse identificador para ignorar retransmissões duplicadas do QoS 1.
 
 ## Como testar
 
-1. Suba o backend e o banco.
-2. Confirme que o backend responde em `http://SEU_IP:8080/swagger-ui.html`.
-3. Grave o firmware no ESP32.
-4. Abra o monitor serial em `115200`.
-5. Verifique se aparecem os logs de leitura e o `HTTP status` do envio.
+1. Em `smartgarden-back`, execute `docker compose up -d` para subir PostgreSQL e Mosquitto.
+2. Suba o backend com `mvn spring-boot:run`.
+3. Confirme que o backend responde em `http://SEU_IP:8080/swagger-ui.html`.
+4. Grave o firmware no ESP32.
+5. Abra o monitor serial em `115200` e verifique a conexão MQTT e o resultado da publicação.
 
-Se o envio estiver funcionando, voce deve ver respostas `201` no monitor serial e os registros aparecendo no PostgreSQL.
+As leituras devem aparecer no PostgreSQL e atualizar Dashboard e Monitoramento por SSE.
