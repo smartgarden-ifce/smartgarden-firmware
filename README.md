@@ -87,7 +87,7 @@ Cada leitura recebe um UUID novo. O backend usa esse identificador para ignorar 
 
 ## Como testar
 
-1. Em `smartgarden-back`, execute `docker compose up -d` para subir PostgreSQL e Mosquitto.
+1. Em `smartgarden-infra`, siga o primeiro uso do README e execute `docker compose up -d` para subir PostgreSQL e Mosquitto.
 2. Suba o backend com `mvn spring-boot:run`.
 3. Confirme que o backend responde em `http://SEU_IP:8080/swagger-ui.html`.
 4. Grave o firmware no ESP32.
